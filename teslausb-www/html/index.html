@@ -906,6 +906,11 @@ video {
       <button class="group2" onclick="syncfunc();">Trigger archive/sync</button>
       <span id="synctext" style="padding-left:20px;"></span>
       <p>
+      <div id="lockchimediv" style="display:none;">
+        <button class="group2" onclick="lockchimefunc();">Rotate lock chime</button>
+        <span id="lockchimetext" style="padding-left:20px;"></span>
+        <p>
+      </div>
       <button class="group2" onclick="startspeedtest(this);" id="speedtestbutton">Run network speed test</button>
       <span>
         <svg id="speedspinner" width="20" height="20" style="margin-left: 10px; vertical-align:middle;visibility:hidden;" viewBox="-12 -12 24 24">
@@ -1371,6 +1376,18 @@ function syncfunc() {
   var msg=document.getElementById('synctext');
   msg.textContent="Sync triggered";
   setTimeout(function() { msg.textContent=""; }, 5000);
+}
+
+function lockchimefunc() {
+  var msg=document.getElementById('lockchimetext');
+  readfile({url:'cgi-bin/lockchime.sh', callback:function(value) {
+    if (value.trim() == "OK") {
+      msg.textContent="New lock chime requested, the drives will reconnect when the car is idle";
+    } else {
+      msg.textContent=value.trim();
+    }
+    setTimeout(function() { msg.textContent=""; }, 8000);
+  }});
 }
 
 class Speedometer {
@@ -1893,6 +1910,8 @@ function readconfig() {
       const toolsbtn = document.querySelector("#tab4");
       toolsbtn.checked = true;
     }
+    const lockchimediv = document.getElementById("lockchimediv");
+    lockchimediv.style.display = (config.lockchime_rotate == "yes") ? "block" : "none";
     const blebtn = document.getElementById("pairingdiv");
     if (config.uses_ble == "yes") {
       blebtn.style.display = "block";

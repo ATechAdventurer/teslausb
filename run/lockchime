@@ -1,0 +1,469 @@
+#!/bin/bash -eu
+#
+# lockchime: rotate the Tesla lock sound (LockChime.wav).
+#
+# Keeps a library of WAV clips on the Pi (LOCKCHIME_DIR, /mutable/LockChimes by
+# default) and copies one of them to the root of one of the drives the car
+# sees, as LockChime.wav.
+#
+# This script only picks, validates and copies files. It never touches the USB
+# gadget itself. The car caches the drive's directory, so it only notices a
+# new LockChime.wav after the drives have been disconnected and reconnected.
+# archiveloop takes care of that, using its regular
+# disconnect_usb_drives_from_host/connect_usb_drives_to_host functions, and
+# only when the car is not writing (see rotate_lock_chime in archiveloop).
+#
+# Usage:
+#   lockchime check FILE...     validate that the files are usable lock chimes
+#   lockchime list              list the valid clips in the library
+#   lockchime pick [CLIP]       print the path of the clip to install next,
+#                               according to LOCKCHIME_MODE (or CLIP, if given)
+#   lockchime is-current CLIP   exit 0 if CLIP is the last installed chime
+#   lockchime install CLIP      copy CLIP to the drive as LockChime.wav. Refuses
+#                               to run while the drives are connected to the
+#                               car, unless --live is given.
+#   lockchime request [CLIP]    ask archiveloop to swap in a new chime (or CLIP)
+#                               and reconnect the drives as soon as it is safe
+#   lockchime status            print the current configuration and state
+#
+# Configuration (in teslausb_setup_variables.conf):
+#   LOCKCHIME_ROTATE    true to enable automatic rotation (default false)
+#   LOCKCHIME_DIR       clip library (default /mutable/LockChimes)
+#   LOCKCHIME_MODE      random (default), sequential, fixed or schedule
+#   LOCKCHIME_FIXED     file name of the clip to use in "fixed" mode
+#   LOCKCHIME_DRIVE     auto (default), lightshow, music or boombox
+#   LOCKCHIME_TRIGGERS  when to rotate: any of "boot archive timer"
+#                       (default "boot archive")
+#   LOCKCHIME_INTERVAL  seconds between rotations for the "timer" trigger
+#                       (default 3600)
+#   LOCKCHIME_MAX_SIZE  maximum clip size in bytes (default 1048576)
+
+if [ -z "${LOCKCHIME_ROTATE+x}" ] && [ -r /root/bin/envsetup.sh ] && [ -r /root/teslausb_setup_variables.conf ]
+then
+  # invoked stand-alone (e.g. from the web UI or an ssh session) rather than
+  # from archiveloop, so read the configuration
+  source /root/bin/envsetup.sh
+fi
+
+if ! declare -F log > /dev/null
+then
+  function log { echo "$@" >&2; }
+fi
+
+readonly CHIME_NAME=LockChime.wav
+readonly LIBRARY="${LOCKCHIME_DIR:-/mutable/LockChimes}"
+readonly MODE="${LOCKCHIME_MODE:-random}"
+readonly MAX_SIZE="${LOCKCHIME_MAX_SIZE:-1048576}"
+readonly SCHEDULE_FILE="$LIBRARY/schedule.txt"
+readonly STATE_FILE="$LIBRARY/.installed"
+# overridable for testing
+readonly REQUEST_FILE="${LOCKCHIME_REQUEST_FILE:-/tmp/lockchime_request}"
+readonly GADGET_DIR=/sys/kernel/config/usb_gadget/teslausb
+
+function die {
+  log "lockchime: $*"
+  exit 1
+}
+
+function read_uint {
+  # read_uint FILE OFFSET BYTES: little-endian unsigned integer at OFFSET
+  od -An -v -t "u$3" --endian=little -j "$2" -N "$3" "$1" | tr -d ' \n'
+}
+
+function read_tag {
+  # read_tag FILE OFFSET: 4 character chunk id at OFFSET
+  dd if="$1" bs=1 skip="$2" count=4 status=none | tr -c '[:print:]' '?'
+}
+
+# Succeeds if $1 is a RIFF/WAVE file with 16 bit integer PCM audio that is no
+# larger than MAX_SIZE. Prints the reason when it fails.
+function check_wav {
+  local -r f="$1"
+  local size
+
+  if [ ! -f "$f" ] || [ ! -r "$f" ]
+  then
+    echo "not a readable file"
+    return 1
+  fi
+  size=$(stat --format=%s "$f")
+  if (( size > MAX_SIZE ))
+  then
+    echo "too large ($size bytes, max $MAX_SIZE)"
+    return 1
+  fi
+  if (( size < 44 )) || [ "$(read_tag "$f" 0)" != "RIFF" ] || [ "$(read_tag "$f" 8)" != "WAVE" ]
+  then
+    echo "not a WAV file"
+    return 1
+  fi
+
+  local -i offset=12
+  local -i chunks=0
+  local format="" bits="" channels="" rate="" have_data=false
+  while (( offset + 8 <= size && chunks < 64 ))
+  do
+    local id len
+    id=$(read_tag "$f" "$offset")
+    len=$(read_uint "$f" $((offset + 4)) 4)
+    case "$id" in
+      "fmt ")
+        format=$(read_uint "$f" $((offset + 8)) 2)
+        channels=$(read_uint "$f" $((offset + 10)) 2)
+        rate=$(read_uint "$f" $((offset + 12)) 4)
+        bits=$(read_uint "$f" $((offset + 22)) 2)
+        ;;
+      data)
+        have_data=true
+        ;;
+    esac
+    if [ -n "$format" ] && [ "$have_data" = "true" ]
+    then
+      break
+    fi
+    # chunks are padded to an even size
+    offset=$((offset + 8 + len + (len & 1)))
+    chunks=$((chunks + 1))
+  done
+
+  if [ -z "$format" ]
+  then
+    echo "no fmt chunk"
+    return 1
+  fi
+  if [ "$format" != "1" ]
+  then
+    echo "not plain PCM (format tag $format)"
+    return 1
+  fi
+  if [ "$bits" != "16" ]
+  then
+    echo "not 16-bit ($bits bits per sample)"
+    return 1
+  fi
+  if [ "$have_data" != "true" ]
+  then
+    echo "no audio data"
+    return 1
+  fi
+  echo "ok (16-bit PCM, $channels channel(s), $rate Hz, $size bytes)"
+}
+
+function is_valid_wav {
+  check_wav "$1" > /dev/null
+}
+
+# All candidate clips in the library, sorted by name. Hidden files (including
+# macOS "._" resource fork files) and the current LockChime.wav are skipped.
+function library_files {
+  [ -d "$LIBRARY" ] || return 0
+  find "$LIBRARY" -maxdepth 1 -type f -iname '*.wav' ! -name '.*' ! -iname "$CHIME_NAME" -printf '%f\n' | LC_ALL=C sort
+}
+
+function valid_clips {
+  local name
+  while read -r name
+  do
+    if is_valid_wav "$LIBRARY/$name"
+    then
+      echo "$name"
+    fi
+  done < <(library_files)
+}
+
+function installed_name {
+  if [ -r "$STATE_FILE" ]
+  then
+    local sum name
+    read -r sum _ name < "$STATE_FILE" || true
+    echo "$name"
+  fi
+}
+
+function pick_random {
+  local -a clips
+  readarray -t clips < <(valid_clips)
+  local -r n=${#clips[@]}
+  if (( n == 0 ))
+  then
+    return 1
+  fi
+  if (( n > 1 ))
+  then
+    # don't play the same chime twice in a row
+    local -r current=$(installed_name)
+    local -a others=()
+    local c
+    for c in "${clips[@]}"
+    do
+      [ "$c" = "$current" ] || others+=("$c")
+    done
+    clips=("${others[@]}")
+  fi
+  echo "${clips[$((RANDOM % ${#clips[@]}))]}"
+}
+
+function pick_sequential {
+  local -a clips
+  readarray -t clips < <(valid_clips)
+  (( ${#clips[@]} > 0 )) || return 1
+  local -r current=$(installed_name)
+  local i
+  for i in "${!clips[@]}"
+  do
+    if [ "${clips[$i]}" = "$current" ]
+    then
+      echo "${clips[$(( (i + 1) % ${#clips[@]} ))]}"
+      return
+    fi
+  done
+  echo "${clips[0]}"
+}
+
+# schedule.txt contains lines of the form "WHEN CLIP", where WHEN is a date
+# (MM-DD), a day of the week (Mon..Sun) or "*", and CLIP is a file name in the
+# library or "random". A date match beats a weekday match, which beats "*".
+# Lines starting with # are ignored.
+function pick_scheduled {
+  local -r today=$(date +%m-%d)
+  local -r weekday=$(date +%a)
+  local when clip datematch="" daymatch="" anymatch=""
+  if [ -r "$SCHEDULE_FILE" ]
+  then
+    while read -r when clip
+    do
+      case "$when" in
+        ""|\#*) continue ;;
+      esac
+      if [ "$when" = "$today" ] && [ -z "$datematch" ]
+      then
+        datematch="$clip"
+      elif [ "${when,,}" = "${weekday,,}" ] && [ -z "$daymatch" ]
+      then
+        daymatch="$clip"
+      elif [ "$when" = "*" ] && [ -z "$anymatch" ]
+      then
+        anymatch="$clip"
+      fi
+    done < "$SCHEDULE_FILE"
+  fi
+  clip="${datematch:-${daymatch:-${anymatch:-random}}}"
+  if [ "$clip" = "random" ]
+  then
+    pick_random
+  else
+    echo "$clip"
+  fi
+}
+
+# Prints the full path of the clip to install. An explicitly requested clip
+# overrides the mode. Invalid choices fall back to a random valid clip.
+function pick {
+  local -r requested="${1:-}"
+  local name=""
+  if [ -n "$requested" ]
+  then
+    name="${requested##*/}"
+  else
+    case "$MODE" in
+      random)     name=$(pick_random) || true ;;
+      sequential) name=$(pick_sequential) || true ;;
+      fixed)      name="${LOCKCHIME_FIXED:-}" ;;
+      schedule)   name=$(pick_scheduled) || true ;;
+      *)          log "lockchime: unknown LOCKCHIME_MODE '$MODE', using random"
+                  name=$(pick_random) || true ;;
+    esac
+  fi
+  if [ -n "$name" ] && [ -e "$LIBRARY/$name" ]
+  then
+    local reason
+    if reason=$(check_wav "$LIBRARY/$name")
+    then
+      echo "$LIBRARY/$name"
+      return
+    fi
+    log "lockchime: skipping $name: $reason"
+  elif [ -n "$name" ]
+  then
+    log "lockchime: $name not found in $LIBRARY"
+  fi
+  if name=$(pick_random)
+  then
+    echo "$LIBRARY/$name"
+    return
+  fi
+  die "no valid clips in $LIBRARY"
+}
+
+function is_current {
+  local -r clip="$1"
+  [ -r "$STATE_FILE" ] || return 1
+  local sum name
+  read -r sum _ name < "$STATE_FILE" || true
+  [ "$name" = "${clip##*/}" ] && [ "$sum" = "$(sha256sum < "$clip" | awk '{print $1}')" ]
+}
+
+# Maps LOCKCHIME_DRIVE to the backing image, fstab mount point and web UI
+# (autofs) name of the drive that gets the chime. "auto" picks the first drive
+# that exists out of lightshow, music and boombox. The cam drive is never used,
+# because the car is constantly writing to it.
+function resolve_drive {
+  local -a candidates
+  case "${LOCKCHIME_DRIVE:-auto}" in
+    auto) candidates=(lightshow music boombox) ;;
+    lightshow|music|boombox) candidates=("${LOCKCHIME_DRIVE}") ;;
+    *) die "invalid LOCKCHIME_DRIVE '${LOCKCHIME_DRIVE}', must be auto, lightshow, music or boombox" ;;
+  esac
+  local d
+  for d in "${candidates[@]}"
+  do
+    if [ -e "/backingfiles/${d}_disk.bin" ]
+    then
+      local webname
+      case $d in
+        lightshow) webname=LightShow ;;
+        music) webname=Music ;;
+        boombox) webname=Boombox ;;
+      esac
+      echo "/backingfiles/${d}_disk.bin /mnt/$d $webname"
+      return
+    fi
+  done
+  die "no ${candidates[*]} drive found to put $CHIME_NAME on"
+}
+
+# Prints where the image is currently mounted, if anywhere.
+function current_mount_of_image {
+  local -r image="$1"
+  local loop
+  while read -r loop
+  do
+    [ -n "$loop" ] || continue
+    local target
+    target=$(findmnt -n -o TARGET --source "$loop" 2> /dev/null | head -1)
+    if [ -n "$target" ]
+    then
+      echo "$target"
+      return
+    fi
+  done < <(losetup -n -O NAME -j "$image" 2> /dev/null)
+}
+
+function install_chime {
+  local -r clip="$1"
+  local -r live="${2:-}"
+  local reason
+  reason=$(check_wav "$clip") || die "$clip: $reason"
+
+  if [ -d "$GADGET_DIR" ] && [ "$live" != "--live" ]
+  then
+    die "the drives are connected to the car. Use 'lockchime request' to have archiveloop swap the chime safely, or --live to copy now (the car won't see it until the drives are reconnected)"
+  fi
+
+  local target unmount_after=false
+  if [ -n "${LOCKCHIME_TARGET_DIR:-}" ]
+  then
+    # for testing, or for setups with non-standard mounts
+    target="$LOCKCHIME_TARGET_DIR"
+  else
+    local drive image mountpoint webname
+    drive=$(resolve_drive) || exit 1
+    read -r image mountpoint webname <<< "$drive"
+    target=$(current_mount_of_image "$image")
+    if [ -z "$target" ] && [ -e /etc/auto.master.d/www.autofs ] &&
+       timeout 10 ls "/var/www/html/fs/$webname/" > /dev/null 2>&1
+    then
+      # Use the web UI's automount, so the image is never mounted twice
+      target="/var/www/html/fs/$webname"
+    fi
+    if [ -z "$target" ]
+    then
+      if declare -F ensure_mountpoint_is_mounted_with_retry > /dev/null
+      then
+        ensure_mountpoint_is_mounted_with_retry "$mountpoint" || die "couldn't mount $mountpoint"
+      else
+        timeout 10 mount "$mountpoint" || die "couldn't mount $mountpoint"
+      fi
+      target="$mountpoint"
+      unmount_after=true
+    fi
+  fi
+
+  local rc=0
+  if cp "$clip" "$target/.$CHIME_NAME.new" && sync -f "$target/.$CHIME_NAME.new" &&
+     mv -f "$target/.$CHIME_NAME.new" "$target/$CHIME_NAME" && sync -f "$target/$CHIME_NAME"
+  then
+    # format: sha256 install-time name (last, so it may contain spaces)
+    echo "$(sha256sum < "$clip" | awk '{print $1}') $(date +%s) ${clip##*/}" > "$STATE_FILE.new"
+    mv -f "$STATE_FILE.new" "$STATE_FILE"
+    log "lockchime: installed ${clip##*/} as $target/$CHIME_NAME"
+  else
+    rm -f "$target/.$CHIME_NAME.new" || true
+    log "lockchime: failed to copy ${clip##*/} to $target"
+    rc=1
+  fi
+
+  if [ "$unmount_after" = "true" ]
+  then
+    umount "$target" || umount -l "$target" || log "lockchime: failed to unmount $target"
+  fi
+  return $rc
+}
+
+function request {
+  local -r clip="${1:-}"
+  if [ -n "$clip" ]
+  then
+    local reason
+    reason=$(check_wav "$LIBRARY/${clip##*/}") || die "${clip##*/}: $reason"
+  fi
+  if [ "${LOCKCHIME_ROTATE:-false}" != "true" ]
+  then
+    die "lock chime rotation is not enabled (set LOCKCHIME_ROTATE=true)"
+  fi
+  echo "${clip##*/}" > "$REQUEST_FILE.new"
+  mv -f "$REQUEST_FILE.new" "$REQUEST_FILE"
+  echo "lock chime swap requested${clip:+ ($clip)}"
+}
+
+function status {
+  echo "enabled:   ${LOCKCHIME_ROTATE:-false}"
+  echo "mode:      $MODE${LOCKCHIME_FIXED:+ ($LOCKCHIME_FIXED)}"
+  echo "triggers:  ${LOCKCHIME_TRIGGERS:-boot archive}"
+  echo "library:   $LIBRARY ($(valid_clips | wc -l) valid clips)"
+  echo "installed: $(installed_name)"
+  if [ -e "$REQUEST_FILE" ]
+  then
+    echo "pending:   swap requested"
+  fi
+}
+
+cmd="${1:-}"
+shift || true
+case "$cmd" in
+  check)
+    (( $# > 0 )) || die "usage: lockchime check FILE..."
+    rc=0
+    for f in "$@"
+    do
+      if reason=$(check_wav "$f")
+      then
+        echo "$f: $reason"
+      else
+        echo "$f: INVALID: $reason"
+        rc=1
+      fi
+    done
+    exit $rc
+    ;;
+  list) valid_clips ;;
+  pick) pick "${1:-}" ;;
+  is-current) (( $# == 1 )) || die "usage: lockchime is-current CLIP"; is_current "$1" ;;
+  install) (( $# >= 1 )) || die "usage: lockchime install CLIP [--live]"; install_chime "$1" "${2:-}" ;;
+  request) request "${1:-}" ;;
+  status) status ;;
+  *)
+    sed -n '/^# Usage:/,/^# Configuration/p' "$0" | sed '$d; s/^# \{0,1\}//'
+    exit 1
+    ;;
+esac

@@ -152,6 +152,28 @@ export CAM_SIZE=40G
 # the duration of that delay
 # export ARCHIVE_DELAY=20
 
+# Lock chime rotation: keep a library of .wav clips in /mutable/LockChimes
+# and have teslausb copy one of them to the root of the lightshow, music or
+# boombox drive as LockChime.wav, so the car's lock sound changes over time.
+# Clips must be 16-bit PCM WAV files of at most 1 MB. In the car, select
+# Toybox > Boombox > Lock Sound > USB. See doc/LockChimeRotation.md.
+# export LOCKCHIME_ROTATE=true
+# How to pick the next clip: random (default, never the same one twice in a
+# row), sequential, fixed (always LOCKCHIME_FIXED), or schedule (per date or
+# day of the week, see /mutable/LockChimes/schedule.txt)
+# export LOCKCHIME_MODE=random
+# export LOCKCHIME_FIXED=my_chime.wav
+# When to rotate. "boot": when teslausb starts (i.e. when the car wakes up and
+# powers the USB port), "archive": every time the car gets home and archiving
+# runs, "timer": every LOCKCHIME_INTERVAL seconds while the car is idle.
+# Rotation can also be triggered from the web UI.
+# export LOCKCHIME_TRIGGERS="boot archive"
+# export LOCKCHIME_INTERVAL=3600
+# Which drive gets LockChime.wav: auto (default, first of lightshow, music,
+# boombox that exists), lightshow, music or boombox
+# export LOCKCHIME_DRIVE=auto
+# export LOCKCHIME_DIR=/mutable/LockChimes
+
 # Uncomment if you want to override the default hostname of "teslausb"
 # export TESLAUSB_HOSTNAME=teslausb-Model3
 

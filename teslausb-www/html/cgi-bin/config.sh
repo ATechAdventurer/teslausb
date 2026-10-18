@@ -9,6 +9,15 @@ function exists(){
   fi
 }
 
+function enabled(){
+  if sudo grep -q -E "^export $1=[\"']?true[\"']?\s*(#.*)?$" /root/teslausb_setup_variables.conf
+  then
+    echo -n yes
+  else
+    echo -n no
+  fi
+}
+
 function configured(){
   if sudo grep -q "^export $1=" /root/teslausb_setup_variables.conf
   then
@@ -27,6 +36,7 @@ Content-type: application/json
    "has_music" : "$(exists /backingfiles/music_disk.bin)",
    "has_lightshow" : "$(exists /backingfiles/lightshow_disk.bin)",
    "has_boombox" : "$(exists /backingfiles/boombox_disk.bin)",
-   "uses_ble" : "$(configured TESLA_BLE_VIN)"
+   "uses_ble" : "$(configured TESLA_BLE_VIN)",
+   "lockchime_rotate" : "$(enabled LOCKCHIME_ROTATE)"
 }
 EOF

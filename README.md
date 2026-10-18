@@ -9,6 +9,7 @@ Raspberry Pi and other [SBCs](## "Single Board Computers") can emulate a USB dri
 - automatically repair filesystem corruption produced by the Tesla's current failure to properly dismount the USB drives before cutting power to the USB ports
 - serve up a web UI to view or download the recordings
 - retain more than one hour of RecentClips (assuming large enough storage)
+- rotate the car's lock sound through a library of clips ([details](doc/LockChimeRotation.md))
 
 This video (not mine) has a nice overview of teslausb and how to install it:
 

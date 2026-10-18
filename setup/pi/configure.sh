@@ -359,6 +359,66 @@ function check_and_install_temperature_monitor () {
   return 0
 }
 
+function check_and_install_lockchime () {
+  local install_path="$1"
+
+  copy_script run/lockchime "$install_path"
+
+  if [ "${LOCKCHIME_ROTATE:-false}" != "true" ]
+  then
+    log_progress "Lock chime rotation not enabled."
+    return 0
+  fi
+  case "${LOCKCHIME_MODE:-random}" in
+    random|sequential|schedule)
+      ;;
+    fixed)
+      if [ -z "${LOCKCHIME_FIXED:+x}" ]
+      then
+        log_progress "STOP: LOCKCHIME_MODE is 'fixed' but LOCKCHIME_FIXED is not set."
+        exit 1
+      fi
+      ;;
+    *)
+      log_progress "STOP: invalid LOCKCHIME_MODE '${LOCKCHIME_MODE}'. Use random, sequential, fixed or schedule."
+      exit 1
+      ;;
+  esac
+  case "${LOCKCHIME_DRIVE:-auto}" in
+    auto|lightshow|music|boombox)
+      ;;
+    *)
+      log_progress "STOP: invalid LOCKCHIME_DRIVE '${LOCKCHIME_DRIVE}'. Use auto, lightshow, music or boombox."
+      exit 1
+      ;;
+  esac
+  local trigger
+  for trigger in ${LOCKCHIME_TRIGGERS:-boot archive}
+  do
+    if [[ ! "$trigger" =~ ^(boot|archive|timer)$ ]]
+    then
+      log_progress "STOP: invalid LOCKCHIME_TRIGGERS entry '$trigger'. Use boot, archive and/or timer."
+      exit 1
+    fi
+  done
+  if [[ -n "${LOCKCHIME_INTERVAL:+x}" && ( ! "$LOCKCHIME_INTERVAL" =~ ^[0-9]+$ || "$LOCKCHIME_INTERVAL" -lt 300 ) ]]
+  then
+    log_progress "STOP: LOCKCHIME_INTERVAL must be a number of seconds, at least 300."
+    exit 1
+  fi
+  if [[ -n "${LOCKCHIME_MAX_SIZE:+x}" && ! "$LOCKCHIME_MAX_SIZE" =~ ^[0-9]+$ ]]
+  then
+    log_progress "STOP: LOCKCHIME_MAX_SIZE must be a number of bytes."
+    exit 1
+  fi
+  if [ ! -e /backingfiles/lightshow_disk.bin ] && [ ! -e /backingfiles/music_disk.bin ] && [ ! -e /backingfiles/boombox_disk.bin ]
+  then
+    log_progress "WARNING: lock chime rotation needs a lightshow, music or boombox drive (LIGHTSHOW_SIZE, MUSIC_SIZE or BOOMBOX_SIZE)."
+  fi
+  mkdir -p "${LOCKCHIME_DIR:-/mutable/LockChimes}"
+  log_progress "Lock chime rotation enabled, put .wav clips in ${LOCKCHIME_DIR:-/mutable/LockChimes}"
+}
+
 function install_archive_scripts () {
   local install_path="$1"
   local archive_module="$2"
@@ -809,6 +869,7 @@ archive_module="$( get_archive_module )"
 log_progress "Using archive module: $archive_module"
 
 install_archive_scripts /root/bin "$archive_module"
+check_and_install_lockchime /root/bin
 /tmp/verify-and-configure-archive.sh
 
 systemctl disable teslausb.service || true

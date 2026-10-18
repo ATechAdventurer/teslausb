@@ -138,6 +138,7 @@ function wait_for_archive_to_be_reachable () {
       rm /tmp/archive_is_reachable
       break
     fi
+    poll_lock_chime
     sleep 1
   done
 }
@@ -241,6 +242,7 @@ function wait_for_archive_to_be_unreachable () {
         rm /tmp/archive_is_unreachable
         break
       fi
+      poll_lock_chime
       sleep 1
   done
 }
@@ -297,6 +299,126 @@ function disconnect_usb_drives_from_host () {
     fix_errors_in_images
   fi
   log "Disconnected usb from host."
+}
+
+# Lock chime rotation (see /root/bin/lockchime and the LOCKCHIME_* settings).
+# The car caches the drive's directory and only picks up a new LockChime.wav
+# after the drives are reconnected, so the swap is done while the drives are
+# disconnected from the car:
+# - "boot" and "archive" swaps happen at points where archiveloop has already
+#   disconnected the drives (fsck/cleanup), right before it reconnects them,
+#   so they don't cause any extra disconnect.
+# - Other swaps (web UI request, timer, deferred retries), and "archive" swaps
+#   when the drives happen to still be connected, first wait for the car to be
+#   idle (waitforidle, same as snapshots), then disconnect, swap and reconnect
+#   using the regular functions. If the car keeps writing (e.g. driving with
+#   dashcam on) the swap is deferred instead.
+readonly LOCKCHIME_PENDING=/tmp/lockchime_pending
+readonly LOCKCHIME_REQUEST=/tmp/lockchime_request
+readonly LOCKCHIME_LAST=/tmp/lockchime_last
+
+function lockchime_enabled () {
+  [ "${LOCKCHIME_ROTATE:-false}" = "true" ] && [ -x /root/bin/lockchime ]
+}
+
+function lockchime_trigger_enabled () {
+  lockchime_enabled && [[ " ${LOCKCHIME_TRIGGERS:-boot archive} " == *" $1 "* ]]
+}
+
+function usb_drives_are_connected () {
+  [ -d /sys/kernel/config/usb_gadget/teslausb ]
+}
+
+function uptime_seconds () {
+  local up
+  read -r -d . up < /proc/uptime
+  echo "$up"
+}
+
+function rotate_lock_chime () {
+  local -r reason="$1"
+  local -r requested="${2:-}"
+  local clip
+
+  uptime_seconds > "$LOCKCHIME_LAST"
+
+  if ! clip=$(/root/bin/lockchime pick "$requested" 2>> "$LOG_FILE")
+  then
+    log "Lock chime ($reason): nothing to install."
+    rm -f "$LOCKCHIME_PENDING"
+    return 0
+  fi
+  if /root/bin/lockchime is-current "$clip"
+  then
+    log "Lock chime ($reason): ${clip##*/} is already installed."
+    rm -f "$LOCKCHIME_PENDING"
+    return 0
+  fi
+
+  local reconnect=false
+  if usb_drives_are_connected
+  then
+    if ! /root/bin/waitforidle
+    then
+      log "Lock chime ($reason): car is busy writing, will retry later."
+      echo "$requested" > "$LOCKCHIME_PENDING"
+      return 0
+    fi
+    disconnect_usb_drives_from_host
+    reconnect=true
+  fi
+
+  log "Lock chime ($reason): installing ${clip##*/}"
+  if /root/bin/lockchime install "$clip" >> "$LOG_FILE" 2>&1
+  then
+    rm -f "$LOCKCHIME_PENDING"
+  else
+    log "Lock chime ($reason): install failed."
+  fi
+
+  if [ "$reconnect" = "true" ]
+  then
+    connect_usb_drives_to_host
+  fi
+}
+
+# Swap at boot/archive time, right before archiveloop reconnects the drives.
+function rotate_lock_chime_on () {
+  if lockchime_trigger_enabled "$1"
+  then
+    rotate_lock_chime "$1" || log "Lock chime: rotation failed."
+  fi
+}
+
+# Called once a second from the wait loops, to handle web UI requests, the
+# "timer" trigger and deferred swaps.
+function poll_lock_chime () {
+  lockchime_enabled || return 0
+
+  if [ -e "$LOCKCHIME_REQUEST" ]
+  then
+    local requested
+    requested=$(cat "$LOCKCHIME_REQUEST")
+    rm -f "$LOCKCHIME_REQUEST"
+    rotate_lock_chime request "$requested" || log "Lock chime: rotation failed."
+    return 0
+  fi
+
+  local last=0
+  if [ -r "$LOCKCHIME_LAST" ]
+  then
+    last=$(cat "$LOCKCHIME_LAST")
+  fi
+  local -r elapsed=$(( $(uptime_seconds) - last ))
+
+  # deferred swaps are retried at most every 5 minutes
+  if [ -e "$LOCKCHIME_PENDING" ] && (( elapsed >= 300 ))
+  then
+    rotate_lock_chime retry "$(cat "$LOCKCHIME_PENDING")" || log "Lock chime: rotation failed."
+  elif lockchime_trigger_enabled timer && (( elapsed >= ${LOCKCHIME_INTERVAL:-3600} ))
+  then
+    rotate_lock_chime timer || log "Lock chime: rotation failed."
+  fi
 }
 
 function convert_seconds_to_nice_time () {
@@ -859,6 +981,9 @@ then
   /root/bin/make_snapshot.sh nofsck
 fi
 
+# the drives are not connected yet, so this is a safe time to swap the chime
+rotate_lock_chime_on boot
+
 connect_usb_drives_to_host
 
 if archive_is_reachable
@@ -874,6 +999,8 @@ then
   /root/bin/awake_stop || true
 
   doubleblink
+
+  rotate_lock_chime_on archive
 
   connect_usb_drives_to_host
 
@@ -905,6 +1032,8 @@ do
   /root/bin/awake_stop || true
 
   doubleblink
+
+  rotate_lock_chime_on archive
 
   connect_usb_drives_to_host
 

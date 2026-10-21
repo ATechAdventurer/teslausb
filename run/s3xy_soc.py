@@ -84,15 +84,20 @@ def parse(buf, fmt='auto'):
     return r if r is not None else (parse_v2(buf) or [])
 
 
+def pct(tenths):
+    """Whole percent from a 0.1 % raw value, rounding half up (57.5 -> 58)."""
+    return (tenths + 5) // 10
+
+
 def decode(state, fid, d):
     """Update state from one frame; True if anything was decoded."""
     if fid == 0x292:            # BMS_socStatus
         ui, avg = bits(d, 10, 10), bits(d, 30, 10)
         if ui is None:
             return False
-        state['soc'] = round(ui * 0.1, 1)
+        state['soc'] = pct(ui)
         if avg is not None:
-            state['soc_avg'] = round(avg * 0.1, 1)
+            state['soc_avg'] = pct(avg)
     elif fid == 0x132:          # BMS_HVBatAmpVolt
         v, a = bits(d, 0, 16), bits(d, 16, 16, True)
         if v is None or a is None:
@@ -168,7 +173,7 @@ def main(argv=None):
     ap.add_argument('--watch', action='store_true')
     a = ap.parse_args(argv)
     show = (lambda st: print(json.dumps(st), flush=True)) if a.json else \
-           (lambda st: print('%.1f' % st['soc'], flush=True))
+           (lambda st: print(st['soc'], flush=True))
     try:
         st = run(a.host, a.port, a.timeout, a.watch, show,
                  None if a.bus < 0 else a.bus, a.format)

@@ -180,6 +180,10 @@ export CAM_SIZE=40G
 # Install /root/bin/s3xy_soc.py, which reads battery SOC from an S3XY Commander
 # over its Wi-Fi Panda stream (add S3XY_OBD to wpa_supplicant yourself).
 # export S3XY_SOC=true
+# Every 10 minutes, read the battery % from the S3XY Commander and, when it
+# changed, rebuild /mutable/LockChimes/charge_chime.wav ("Tesla offline. XM
+# reserves, N percent.") and queue it as the lock chime. Needs LOCKCHIME_ROTATE.
+# export CHARGECHIME_AUTO=true
 
 # Uncomment if you want to override the default hostname of "teslausb"
 # export TESLAUSB_HOSTNAME=teslausb-Model3

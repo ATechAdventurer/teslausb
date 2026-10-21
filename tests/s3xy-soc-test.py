@@ -30,14 +30,16 @@ for fmt, enc in (('legacy', leg), ('v2', v2)):
     frames = m.parse(enc(0x292, soc) + enc(0x132, hv) + enc(0x123, b'\1\2'), 'auto' if fmt == 'legacy' else 'packed') or m.parse(enc(0x292, soc) + enc(0x132, hv) + enc(0x123, b'\1\2'))
     st = {}
     for b, f, d in frames: m.decode(st, f, d)
-    check(fmt + ' soc', st.get('soc'), 47.3)
+    check(fmt + ' soc', st.get('soc'), 47)
     check(fmt + ' voltage', st.get('voltage'), 365.12)
     check(fmt + ' current', st.get('current'), -12.5)
     check(fmt + ' charging', st.get('charging'), True)
 check('legacy skips ack', m.parse(struct.pack('<II', 6 << 21, 15 << 4) + bytes(8)), [])
 check('short frame ignored', m.decode({}, 0x292, b'\1\2'), False)
 check('extended id', m.parse_legacy(struct.pack('<II', (0x18DAF1 << 3) | 4, 2) + bytes(8))[0][1], 0x18DAF1)
-st = {}; m.decode(st, 0x292, soc[:3]); check('short 0x292 keeps ui', (st.get('soc'), 'soc_avg' in st), (47.3, False))
+st = {}; m.decode(st, 0x292, soc[:3]); check('short 0x292 keeps ui', (st.get('soc'), 'soc_avg' in st), (47, False))
+check('round half up', [m.pct(r) for r in (575, 574, 5, 4, 1000)], [58, 57, 1, 0, 100])
+st = {}; m.decode(st, 0x292, pack([(10, 10, 575), (30, 10, 485)])); check('json ints', (st['soc'], st['soc_avg'], type(st['soc'])), (58, 49, int))
 check('signed', m.bits((0xffff).to_bytes(2, 'little'), 0, 16, True), -1)
 
 # end to end against a fake Commander on localhost
@@ -52,7 +54,7 @@ with contextlib.redirect_stdout(out):
     rc = m.main(['--host', '127.0.0.1', '--port', str(port), '--json', '--timeout', '3'])
 check('e2e rc', rc, 0)
 check('e2e only hello sent', seen, [b'ehllo'])
-check('e2e soc', json.loads(out.getvalue())['soc'], 47.3)
+check('e2e soc', json.loads(out.getvalue())['soc'], 47)
 with contextlib.redirect_stderr(io.StringIO()):
     check('timeout rc', m.main(['--host', '127.0.0.1', '--port', '9', '--timeout', '1']), 2)
 print('s3xy tests: %d failed' % fails)

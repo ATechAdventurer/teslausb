@@ -424,6 +424,50 @@ function check_and_install_lockchime () {
     copy_script run/s3xy_soc.py "$install_path"
     chmod +x "$install_path/s3xy_soc.py"
   fi
+  check_and_install_chargechime "$install_path"
+}
+
+# Battery-% lock chime (doc/LockChimeRotation.md): every 10 minutes read the
+# SOC from the S3XY Commander and queue a rebuilt charge_chime.wav when it changed
+function check_and_install_chargechime () {
+  local install_path="$1"
+  if [ "${CHARGECHIME_AUTO:-false}" != "true" ]
+  then
+    if [ -e /lib/systemd/system/chargechime.timer ]
+    then
+      systemctl disable --now chargechime.timer || true
+    fi
+    return 0
+  fi
+  copy_script run/s3xy_soc.py "$install_path"
+  copy_script run/chime_assemble.py "$install_path"
+  copy_script run/chargechime_auto "$install_path"
+  mkdir -p /mutable/ChargeChimeParts
+  cp "$SOURCE_DIR"/assets/ingress/*.wav /mutable/ChargeChimeParts/
+
+  cat << EOF > /lib/systemd/system/chargechime.service
+[Unit]
+Description=Rebuild the battery lock chime from the S3XY Commander SOC
+After=mutable.mount
+
+[Service]
+Type=oneshot
+Environment=LOCKCHIME_DIR=${LOCKCHIME_DIR:-/mutable/LockChimes}
+ExecStart=$install_path/chargechime_auto
+EOF
+  cat << EOF > /lib/systemd/system/chargechime.timer
+[Unit]
+Description=Check the battery % for the lock chime every 10 minutes
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=10min
+
+[Install]
+WantedBy=timers.target
+EOF
+  systemctl enable chargechime.timer
+  log_progress "Battery lock chime timer enabled."
 }
 
 # BLE service to pick the lock chime from a phone (doc/LockChimeRotation.md)

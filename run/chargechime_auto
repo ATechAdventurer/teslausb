@@ -1,0 +1,41 @@
+#!/bin/bash
+# Run by chargechime.timer: read the battery % from the S3XY Commander and,
+# when the whole-percent value changed, rebuild /mutable/LockChimes/charge_chime.wav
+# and queue it with "lockchime request" (archiveloop swaps it in safely).
+# Skips quietly when there's no reading (not on S3XY_OBD, car asleep).
+set -u
+BIN="${CHARGECHIME_BIN:-/root/bin}"
+LIB="${LOCKCHIME_DIR:-/mutable/LockChimes}"
+LAST="${CHARGECHIME_LAST:-/mutable/chargechime.last}"
+LOG="${CHARGECHIME_LOG:-/mutable/archiveloop.log}"
+SOC_CMD="${CHARGECHIME_SOC_CMD:-$BIN/s3xy_soc.py --json --timeout 15}"
+OUT="$LIB/charge_chime.wav"
+
+log () { echo "$(date): chargechime: $*" >> "$LOG"; }
+
+exec 9> /tmp/chargechime.lock
+flock -n 9 || exit 0
+
+json=$($SOC_CMD 2> /dev/null) || exit 0
+soc=$(printf '%s' "$json" | python3 -c 'import json,sys; print(int(json.load(sys.stdin)["soc"]))' 2> /dev/null) || exit 0
+[[ "$soc" =~ ^[0-9]+$ ]] && (( soc >= 1 && soc <= 100 )) || exit 0
+
+last=$(cat "$LAST" 2> /dev/null || true)
+if [ "$soc" = "$last" ] && [ -e "$OUT" ]
+then
+  exit 0
+fi
+
+if ! python3 "$BIN/chime_assemble.py" "$soc" -o "$OUT" > /dev/null 2>> "$LOG"
+then
+  log "assembling ${soc}% failed"
+  exit 1
+fi
+if msg=$("$BIN/lockchime" request charge_chime.wav 2>&1)
+then
+  echo "$soc" > "$LAST.new" && mv -f "$LAST.new" "$LAST"
+  log "battery ${soc}% (was ${last:-unknown}), built charge_chime.wav and requested a swap"
+else
+  log "battery ${soc}%: lockchime request failed: $msg"
+  exit 1
+fi

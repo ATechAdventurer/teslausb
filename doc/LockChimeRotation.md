@@ -193,3 +193,21 @@ for anything more sensitive.
 - Which drive the car reads `LockChime.wav` from when several drives are
   connected. The default is the lightshow drive; try `LOCKCHIME_DRIVE` if the
   car doesn't pick it up.
+
+## Battery-% chime from an S3XY Commander
+
+With `export CHARGECHIME_AUTO=true` (and `LOCKCHIME_ROTATE=true`), setup installs
+`s3xy_soc.py`, `chime_assemble.py` and `chargechime_auto` into `/root/bin`, the
+voice/effect parts into `/mutable/ChargeChimeParts`, and `chargechime.timer`
+(2 min after boot, then every 10 min). Each run reads the battery % (whole
+percent, rounded half up) from the Commander's Wi-Fi Panda stream; with no
+reading (Pi not on `S3XY_OBD`, car asleep) it does nothing. When the % differs
+from `/mutable/chargechime.last`, it rebuilds
+`/mutable/LockChimes/charge_chime.wav` ("Tesla offline. XM reserves, [critical,]
+N percent." in ADA's voice, Ingress effects) and runs
+`lockchime request charge_chime.wav`, so archiveloop swaps it in the usual safe
+way. `charge_chime.wav` is never picked by the random/sequential rotation, but a
+later rotation (boot/archive trigger) will replace it with another clip.
+
+The parts are pre-processed once with ffmpeg by `tools/build_chime_parts.py`
+(from the Ingress 1.88 sounds); the Pi only mixes them with Python's `audioop`.

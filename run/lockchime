@@ -57,6 +57,9 @@ then
 fi
 
 readonly CHIME_NAME=LockChime.wav
+# written by chargechime_auto; only ever installed by explicit request, never
+# picked by the random/sequential rotation
+readonly GENERATED_NAME=charge_chime.wav
 readonly LIBRARY="${LOCKCHIME_DIR:-/mutable/LockChimes}"
 readonly MODE="${LOCKCHIME_MODE:-random}"
 readonly MAX_SIZE="${LOCKCHIME_MAX_SIZE:-1048576}"
@@ -164,10 +167,11 @@ function is_valid_wav {
 }
 
 # All candidate clips in the library, sorted by name. Hidden files (including
-# macOS "._" resource fork files) and the current LockChime.wav are skipped.
+# macOS "._" resource fork files), the current LockChime.wav and the generated
+# charge_chime.wav are skipped.
 function library_files {
   [ -d "$LIBRARY" ] || return 0
-  find "$LIBRARY" -maxdepth 1 -type f -iname '*.wav' ! -name '.*' ! -iname "$CHIME_NAME" -printf '%f\n' | LC_ALL=C sort
+  find "$LIBRARY" -maxdepth 1 -type f -iname '*.wav' ! -name '.*' ! -iname "$CHIME_NAME" ! -iname "$GENERATED_NAME" -printf '%f\n' | LC_ALL=C sort
 }
 
 function valid_clips {

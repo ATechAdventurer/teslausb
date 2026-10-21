@@ -26,6 +26,10 @@ shellcheck --exclude=SC1091 \
            ./tools/load-lockchimes.sh \
            ./tests/lockchime-test.sh || rc=$?
 
+# BLE lock chime service (Python)
+python3 -m py_compile ./run/lockchime_ble.py || rc=$?
+rm -rf ./run/__pycache__
+
 # lock chime selection/validation tests (no Pi needed)
 ./tests/lockchime-test.sh || rc=$?
 

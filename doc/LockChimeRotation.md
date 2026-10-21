@@ -126,6 +126,63 @@ The drive is written through whatever mount is already active (for example the
 web UI's), the web UI's automount, or the regular `/mnt/<drive>` mount, so the
 drive image is never mounted twice.
 
+## Picking the chime over Bluetooth (BLE)
+
+With `export LOCKCHIME_BLE=true` (and `LOCKCHIME_ROTATE=true`), setup installs
+`/root/bin/lockchime_ble.py` as the `lockchime-ble` systemd service. It makes
+the Pi a Bluetooth LE peripheral named **TeslaUSB**, no Wi-Fi needed. Setup
+installs `bluez`, `python3-dbus` and `python3-gi`, and re-enables Bluetooth if
+`dtoverlay=disable-bt` is in `config.txt`.
+
+| | UUID |
+|---|---|
+| Service | `7e1a0001-5c3b-4d6a-9f2e-1d7c0b4a7e55` |
+| Chime characteristic (read, write, write without response) | `7e1a0002-5c3b-4d6a-9f2e-1d7c0b4a7e55` |
+
+Write a number N from 1 to 10, either as UTF-8 text (`3`) or as a single raw
+byte (`0x03`), and `chime_N.wav` from `/mutable/LockChimes` becomes the lock
+chime. Reading the characteristic returns the last number written. Numbers out
+of range are rejected; numbers with no valid `chime_N.wav` are logged and
+ignored. The upper limit is `MAX_CHIME` at the top of the script (raise it to
+100 later).
+
+The clip list is validated once at startup. After adding clips, run
+`sudo systemctl reload lockchime-ble` (or restart it) so it rescans.
+
+### Low-latency swap, and the tradeoff
+
+A write runs `lockchime install-now chime_N.wav` straight away, which
+disconnects the drives from the car, copies the clip (temp file, sync,
+rename) and reconnects them, typically within a couple of seconds. Unlike the
+regular swap it does **not** wait for the car to be idle (`waitforidle`), does
+not go through archiveloop's request queue, and does not fsck the drives.
+That means a swap during driving or Sentry recording **could cut off a dashcam
+write in progress** (the clip being written may be lost or need repair later).
+If archiveloop has the drives disconnected (archiving, fsck) or a snapshot is
+being taken, `install-now` doesn't wait: it falls back to the queued
+`lockchime request`, which archiveloop handles safely. Both sides use the lock
+file `/tmp/lockchime.lock`.
+
+### Security gap
+
+There is no pairing or encryption, so anyone within Bluetooth range can change
+your lock chime (only to a clip already in the library). Don't rely on this
+for anything more sensitive.
+
+### Testing from an iPhone
+
+1. Install **nRF Connect** or **LightBlue** from the App Store.
+2. Scan and connect to **TeslaUSB**.
+3. Open the service `7E1A0001-5C3B-4D6A-9F2E-1D7C0B4A7E55`.
+4. On characteristic `7E1A0002-…`, tap write (the up arrow), choose UTF-8 /
+   Text, enter `3` and send.
+5. On the Pi: `sudo tail /mutable/archiveloop.log` should show
+   `lockchime_ble: write 3 -> chime_3.wav` and
+   `lockchime: install-now chime_3.wav done (rc=0)`, and
+   `sudo /root/bin/lockchime status` should show `installed: chime_3.wav`.
+   Reading the characteristic returns `3`. Service logs:
+   `journalctl -u lockchime-ble`.
+
 ## Things to test
 
 - **How quickly the car notices a swapped file is unconfirmed.** It isn't

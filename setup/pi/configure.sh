@@ -417,6 +417,75 @@ function check_and_install_lockchime () {
   fi
   mkdir -p "${LOCKCHIME_DIR:-/mutable/LockChimes}"
   log_progress "Lock chime rotation enabled, put .wav clips in ${LOCKCHIME_DIR:-/mutable/LockChimes}"
+  check_and_install_lockchime_ble "$install_path"
+}
+
+# BLE service to pick the lock chime from a phone (doc/LockChimeRotation.md)
+function check_and_install_lockchime_ble () {
+  local install_path="$1"
+
+  if [ "${LOCKCHIME_BLE:-false}" != "true" ]
+  then
+    if [ -e /lib/systemd/system/lockchime-ble.service ]
+    then
+      systemctl disable lockchime-ble.service || true
+    fi
+    log_progress "Lock chime BLE service not enabled."
+    return 0
+  fi
+
+  local pkg
+  for pkg in bluez python3-dbus python3-gi
+  do
+    if ! dpkg-query -W --showformat='${db:Status-Status}\n' "$pkg" 2>/dev/null | grep -q '^installed$'
+    then
+      log_progress "Installing $pkg for the lock chime BLE service"
+      DEBIAN_FRONTEND=noninteractive apt-get -y --force-yes install "$pkg"
+    fi
+  done
+  if [[ -n "$(apt-cache search pi-bluetooth)" ]] &&
+     ! dpkg-query -W --showformat='${db:Status-Status}\n' pi-bluetooth 2>/dev/null | grep -q '^installed$'
+  then
+    DEBIAN_FRONTEND=noninteractive apt-get -y --force-yes install pi-bluetooth
+  fi
+
+  # make sure Bluetooth isn't turned off
+  local cfg
+  for cfg in /boot/firmware/config.txt /boot/config.txt
+  do
+    if [ -f "$cfg" ] && grep -qE '^dtoverlay=(pi3-)?disable-bt' "$cfg"
+    then
+      sed -i -E 's/^dtoverlay=(pi3-)?disable-bt/#&/' "$cfg"
+      log_progress "Re-enabled Bluetooth in $cfg (takes effect after reboot)"
+    fi
+  done
+  systemctl unmask bluetooth.service hciuart.service 2> /dev/null || true
+  systemctl enable bluetooth.service || true
+  systemctl enable hciuart.service 2> /dev/null || true
+
+  copy_script run/lockchime_ble.py "$install_path"
+  chmod +x "$install_path/lockchime_ble.py"
+
+  cat << EOF > /lib/systemd/system/lockchime-ble.service
+[Unit]
+Description=TeslaUSB lock chime BLE service
+After=bluetooth.service mutable.mount
+Wants=bluetooth.service
+
+[Service]
+Type=simple
+Environment=LOCKCHIME_DIR=${LOCKCHIME_DIR:-/mutable/LockChimes}
+ExecStartPre=-/usr/bin/btmgmt power on
+ExecStart=/usr/bin/python3 $install_path/lockchime_ble.py
+ExecReload=/bin/kill -HUP \$MAINPID
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl enable lockchime-ble.service
+  log_progress "Lock chime BLE service enabled."
 }
 
 function install_archive_scripts () {

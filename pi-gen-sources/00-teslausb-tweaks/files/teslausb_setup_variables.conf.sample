@@ -173,6 +173,10 @@ export CAM_SIZE=40G
 # boombox that exists), lightshow, music or boombox
 # export LOCKCHIME_DRIVE=auto
 # export LOCKCHIME_DIR=/mutable/LockChimes
+# Pick the lock chime from a phone over Bluetooth LE: write a number N (1-10)
+# to the "TeslaUSB" BLE service and chime_N.wav is swapped in immediately.
+# No pairing/encryption: anyone nearby can change it. Needs LOCKCHIME_ROTATE.
+# export LOCKCHIME_BLE=true
 
 # Uncomment if you want to override the default hostname of "teslausb"
 # export TESLAUSB_HOSTNAME=teslausb-Model3

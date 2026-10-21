@@ -24,6 +24,12 @@
 #                               car, unless --live is given.
 #   lockchime request [CLIP]    ask archiveloop to swap in a new chime (or CLIP)
 #                               and reconnect the drives as soon as it is safe
+#   lockchime install-now CLIP  fast path (used by the BLE service): swap CLIP
+#                               in right away. Disconnects the drives, copies,
+#                               reconnects, with no idle wait and no fsck. CLIP
+#                               must already be validated (no WAV check here).
+#                               If archiveloop or a snapshot holds the lock,
+#                               falls back to 'request CLIP'.
 #   lockchime status            print the current configuration and state
 #
 # Configuration (in teslausb_setup_variables.conf):
@@ -59,6 +65,10 @@ readonly STATE_FILE="$LIBRARY/.installed"
 # overridable for testing
 readonly REQUEST_FILE="${LOCKCHIME_REQUEST_FILE:-/tmp/lockchime_request}"
 readonly GADGET_DIR=/sys/kernel/config/usb_gadget/teslausb
+# held by archiveloop while the drives are disconnected (archiving, fsck,
+# chime swaps) and by install-now; overridable for testing
+readonly SWAP_LOCK="${LOCKCHIME_LOCK_FILE:-/tmp/lockchime.lock}"
+readonly SNAPSHOT_LOCK="${LOCKCHIME_SNAPSHOT_LOCK:-/backingfiles/snapshots}"
 
 function die {
   log "lockchime: $*"
@@ -353,7 +363,10 @@ function install_chime {
   local -r clip="$1"
   local -r live="${2:-}"
   local reason
-  reason=$(check_wav "$clip") || die "$clip: $reason"
+  if [ "${LOCKCHIME_PREVALIDATED:-}" != "true" ]
+  then
+    reason=$(check_wav "$clip") || die "$clip: $reason"
+  fi
 
   if [ -d "$GADGET_DIR" ] && [ "$live" != "--live" ]
   then
@@ -426,6 +439,48 @@ function request {
   echo "lock chime swap requested${clip:+ ($clip)}"
 }
 
+# Low-latency swap for the BLE service. Trades the idle wait and fsck that
+# archiveloop does for speed, see doc/LockChimeRotation.md.
+function install_now {
+  local -r name="${1##*/}"
+  local -r clip="$LIBRARY/$name"
+  [ -n "$name" ] && [ -f "$clip" ] || die "$name not found in $LIBRARY"
+  [ "${LOCKCHIME_ROTATE:-false}" = "true" ] || die "lock chime rotation is not enabled (set LOCKCHIME_ROTATE=true)"
+
+  exec 8> "$SWAP_LOCK"
+  if ! flock -n 8
+  then
+    log "lockchime: busy (archiving or swapping), queueing $name"
+    request "$name"
+    return
+  fi
+  if [ -d "$SNAPSHOT_LOCK" ]
+  then
+    exec 7< "$SNAPSHOT_LOCK"
+    if ! flock -n 7
+    then
+      log "lockchime: snapshot in progress, queueing $name"
+      flock -u 8
+      request "$name"
+      return
+    fi
+  fi
+
+  local connected=false rc=0
+  if [ -d "$GADGET_DIR" ]
+  then
+    connected=true
+    /root/bin/disable_gadget.sh > /dev/null 2>&1 || log "lockchime: disable_gadget failed"
+  fi
+  LOCKCHIME_PREVALIDATED=true install_chime "$clip" --live || rc=$?
+  if [ "$connected" = "true" ]
+  then
+    /root/bin/enable_gadget.sh > /dev/null 2>&1 || { log "lockchime: enable_gadget failed"; rc=1; }
+  fi
+  log "lockchime: install-now $name done (rc=$rc)"
+  return $rc
+}
+
 function status {
   echo "enabled:   ${LOCKCHIME_ROTATE:-false}"
   echo "mode:      $MODE${LOCKCHIME_FIXED:+ ($LOCKCHIME_FIXED)}"
@@ -461,6 +516,7 @@ case "$cmd" in
   is-current) (( $# == 1 )) || die "usage: lockchime is-current CLIP"; is_current "$1" ;;
   install) (( $# >= 1 )) || die "usage: lockchime install CLIP [--live]"; install_chime "$1" "${2:-}" ;;
   request) request "${1:-}" ;;
+  install-now) (( $# == 1 )) || die "usage: lockchime install-now CLIP"; install_now "$1" ;;
   status) status ;;
   *)
     sed -n '/^# Usage:/,/^# Configuration/p' "$0" | sed '$d; s/^# \{0,1\}//'

@@ -120,6 +120,8 @@ function connect_usb_drives_to_host() {
   log "Connecting usb to host..."
   /root/bin/enable_gadget.sh
   log "Connected usb to host."
+  # let 'lockchime install-now' (BLE service) swap chimes again
+  flock -u 8 2> /dev/null || true
   sleep 5
 }
 
@@ -293,6 +295,10 @@ function fix_errors_in_images () {
 }
 
 function disconnect_usb_drives_from_host () {
+  # keep 'lockchime install-now' (BLE service) away while the drives are
+  # disconnected for archiving/fsck; it queues a request instead
+  exec 8> "${LOCKCHIME_LOCK_FILE:-/tmp/lockchime.lock}"
+  flock 8 || true
   log "Disconnecting usb from host..."
   if /root/bin/disable_gadget.sh
   then

@@ -16,6 +16,7 @@ export LOCKCHIME_ROTATE=true
 export LOCKCHIME_DIR="$work/lib"
 export LOCKCHIME_TARGET_DIR="$work/drive"
 export LOCKCHIME_REQUEST_FILE="$work/lockchime_request"
+export LOCKCHIME_LOCK_FILE="$work/lockchime.lock"
 unset LOCKCHIME_MODE LOCKCHIME_FIXED LOCKCHIME_MAX_SIZE
 mkdir -p "$LOCKCHIME_DIR" "$LOCKCHIME_TARGET_DIR"
 
@@ -209,6 +210,22 @@ expect_eq "$(calls)" "waitforidle disconnect connect " "timer due"
 
 # request refused when rotation is disabled
 expect_fail env LOCKCHIME_ROTATE=false "$lockchime" request
+
+# install-now (BLE fast path): installs right away when the lock is free
+rm -f "$work/lockchime_request"
+expect_ok "$lockchime" install-now b.wav
+expect_ok "$lockchime" is-current "$lib/b.wav"
+expect_fail test -e "$work/lockchime_request"
+expect_fail "$lockchime" install-now missing.wav
+# ...and queues a request while archiveloop holds the lock
+(
+  exec 8> "$LOCKCHIME_LOCK_FILE"
+  flock 8
+  "$lockchime" install-now a.wav > /dev/null 2>&1
+)
+expect_eq "$(cat "$work/lockchime_request" 2> /dev/null)" "a.wav" "install-now queued while locked"
+expect_ok "$lockchime" is-current "$lib/b.wav"
+rm -f "$work/lockchime_request"
 
 echo "lockchime tests: $passes passed, $failures failed"
 (( failures == 0 ))

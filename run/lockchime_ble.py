@@ -107,7 +107,7 @@ class Service(dbus.service.Object):
 
     def props(self):
         return {GATT_SERVICE_IFACE: {
-            'UUID': SERVICE_UUID, 'Primary': True,
+            'UUID': SERVICE_UUID, 'Primary': dbus.Boolean(True),
             'Characteristics': dbus.Array([c.path for c in self.chrcs], signature='o')}}
 
 
@@ -123,8 +123,8 @@ class ChimeCharacteristic(dbus.service.Object):
 
     def props(self):
         return {GATT_CHRC_IFACE: {
-            'Service': self.service.path, 'UUID': CHIME_CHAR_UUID,
-            'Flags': ['read', 'write', 'write-without-response']}}
+            'Service': dbus.ObjectPath(self.service.path), 'UUID': CHIME_CHAR_UUID,
+            'Flags': dbus.Array(['read', 'write', 'write-without-response'], signature='s')}}
 
     @dbus.service.method(PROPS_IFACE, in_signature='s', out_signature='a{sv}')
     def GetAll(self, interface):

@@ -211,7 +211,24 @@ def main():
     app.services.append(svc)
     adv = Advertisement(bus)
 
+    # log connects/disconnects (BlueZ 5.50 doesn't expose the HCI reason;
+    # use `sudo btmon -w /mutable/btmon.snoop` for that)
+    def on_dev(iface, changed, invalidated, path=None):
+        if iface == 'org.bluez.Device1' and 'Connected' in changed:
+            log('%s %s' % ('connected' if changed['Connected'] else 'disconnected',
+                           path.rsplit('/', 1)[-1]))
+    bus.add_signal_receiver(on_dev, dbus_interface=PROPS_IFACE,
+                            signal_name='PropertiesChanged', bus_name=BLUEZ,
+                            path_keyword='path')
+
     loop = GLib.MainLoop()
+    stopping = []
+
+    def on_term():
+        stopping.append(True)
+        loop.quit()
+        return False
+    GLib.unix_signal_add(GLib.PRIORITY_HIGH, 15, on_term)  # SIGTERM
 
     def fail(what):
         def cb(err):
@@ -225,8 +242,16 @@ def main():
     dbus.Interface(adapter, AD_MANAGER_IFACE).RegisterAdvertisement(
         adv.path, {}, reply_handler=lambda: log('advertising as %s' % LOCAL_NAME),
         error_handler=fail('RegisterAdvertisement'))
-    loop.run()
-    return 1  # systemd restarts us
+    try:
+        loop.run()
+    finally:
+        for mgr, method, path in ((AD_MANAGER_IFACE, 'UnregisterAdvertisement', adv.path),
+                                  (GATT_MANAGER_IFACE, 'UnregisterApplication', app.path)):
+            try:
+                getattr(dbus.Interface(adapter, mgr), method)(path)
+            except dbus.exceptions.DBusException:
+                pass
+    return 0 if stopping else 1  # systemd restarts us on failure
 
 
 if __name__ == '__main__':

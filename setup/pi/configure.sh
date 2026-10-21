@@ -475,6 +475,8 @@ Wants=bluetooth.service
 [Service]
 Type=simple
 Environment=LOCKCHIME_DIR=${LOCKCHIME_DIR:-/mutable/LockChimes}
+ExecStartPre=-/usr/bin/btmgmt clr-adv
+ExecStartPre=-/bin/sh -c 'mountpoint -q /sys/kernel/debug || mount -t debugfs none /sys/kernel/debug; d=/sys/kernel/debug/bluetooth/hci0; echo 160 > \$d/adv_min_interval; echo 320 > \$d/adv_max_interval'
 ExecStartPre=-/usr/bin/btmgmt power on
 ExecStart=/usr/bin/python3 $install_path/lockchime_ble.py
 ExecReload=/bin/kill -HUP \$MAINPID
@@ -486,6 +488,22 @@ WantedBy=multi-user.target
 EOF
   systemctl enable lockchime-ble.service
   log_progress "Lock chime BLE service enabled."
+
+  # Wi-Fi power save on the shared BT/Wi-Fi radio causes BLE drops
+  cat << EOF > /etc/systemd/system/wifi-nopowersave.service
+[Unit]
+Description=Disable wlan0 power save (BT/WiFi coexistence)
+After=sys-subsystem-net-devices-wlan0.device
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=-/sbin/iwconfig wlan0 power off
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  systemctl enable wifi-nopowersave.service || true
 }
 
 function install_archive_scripts () {

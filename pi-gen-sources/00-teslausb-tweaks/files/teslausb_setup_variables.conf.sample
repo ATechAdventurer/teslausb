@@ -177,6 +177,9 @@ export CAM_SIZE=40G
 # to the "TeslaUSB" BLE service and chime_N.wav is swapped in immediately.
 # No pairing/encryption: anyone nearby can change it. Needs LOCKCHIME_ROTATE.
 # export LOCKCHIME_BLE=true
+# Install /root/bin/s3xy_soc.py, which reads battery SOC from an S3XY Commander
+# over its Wi-Fi Panda stream (add S3XY_OBD to wpa_supplicant yourself).
+# export S3XY_SOC=true
 
 # Uncomment if you want to override the default hostname of "teslausb"
 # export TESLAUSB_HOSTNAME=teslausb-Model3

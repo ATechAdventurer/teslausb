@@ -418,6 +418,12 @@ function check_and_install_lockchime () {
   mkdir -p "${LOCKCHIME_DIR:-/mutable/LockChimes}"
   log_progress "Lock chime rotation enabled, put .wav clips in ${LOCKCHIME_DIR:-/mutable/LockChimes}"
   check_and_install_lockchime_ble "$install_path"
+  if [ "${S3XY_SOC:-false}" = "true" ]
+  then
+    # battery SOC reader for an S3XY Commander (Panda Wi-Fi); not wired to chimes yet
+    copy_script run/s3xy_soc.py "$install_path"
+    chmod +x "$install_path/s3xy_soc.py"
+  fi
 }
 
 # BLE service to pick the lock chime from a phone (doc/LockChimeRotation.md)

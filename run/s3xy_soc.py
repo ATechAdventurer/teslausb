@@ -147,6 +147,8 @@ def run(host, port, timeout, watch, cb, bus=None, fmt='auto'):
             try:
                 buf, addr = s.recvfrom(65535)
             except (socket.timeout, OSError):
+                if got and not watch and time.time() - start > timeout:
+                    return state
                 continue
             if addr[0] != host:
                 continue

@@ -13,6 +13,7 @@ Exit 0 on success, 2 on timeout (Commander unreachable / car asleep).
 Protocol and bit layouts follow V's TeslaRead tool (src/panda.ts, can.ts,
 decode.ts): kick "ehllo" to UDP 1338 every 3 s from an ephemeral port, legacy
 16-byte panda records, bus 0. Decoding (Model 3 community DBC, little-endian):
+  0x33A UI display SOC: 20|7 % (what the car's screen shows)
   0x292 ID292BMS_SOC: SOCUI292 10|10 x0.1 %, SOCave292 30|10 x0.1 %
   0x132 ID132HVBattAmpVolt: BattVoltage132 0|16 x0.01 V,
         SmoothBattCurrent132 16|16 signed x-0.1 A (negative = into pack)
@@ -95,9 +96,16 @@ def decode(state, fid, d):
         ui, avg = bits(d, 10, 10), bits(d, 30, 10)
         if ui is None:
             return False
-        state['soc'] = pct(ui)
+        state['soc_bms'] = pct(ui)
+        if state.get('soc_src') != 'display':   # fallback until 0x33A shows up
+            state['soc'], state['soc_src'] = pct(ui), 'bms'
         if avg is not None:
             state['soc_avg'] = pct(avg)
+    elif fid == 0x33A:          # UI_range: on-screen battery %, bits 20|7
+        ui = bits(d, 20, 7)        # (opendbc's 56|7 doesn't match a 2023 M3)
+        if ui is None or ui > 100:
+            return False
+        state['soc'], state['soc_src'] = ui, 'display'
     elif fid == 0x132:          # BMS_HVBatAmpVolt
         v, a = bits(d, 0, 16), bits(d, 16, 16, True)
         if v is None or a is None:
@@ -150,7 +158,8 @@ def run(host, port, timeout, watch, cb, bus=None, fmt='auto'):
                     state['ts'] = int(time.time())
                     if not watch:
                         # give 0x132 a moment to show up too
-                        if 'voltage' in state or time.time() - start > timeout:
+                        # wait for the on-screen % (0x33A); 0x292 only if it never comes
+                        if state.get('soc_src') == 'display' and 'voltage' in state:
                             return state
                     elif time.time() - last_print >= 1:
                         last_print = time.time()

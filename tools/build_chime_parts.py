@@ -18,6 +18,9 @@ VOICE = ('highpass=f=100,acompressor=threshold=-20dB:ratio=3:attack=5:release=80
 TRIM = ('aresample=44100,aformat=channel_layouts=mono,'
         'silenceremove=start_periods=1:start_threshold=-50dB,areverse,'
         'silenceremove=start_periods=1:start_threshold=-50dB,areverse')
+# per-word post chain: 'tesla' sits under the failed/power-down fx, so lift it
+# and add presence (2-5 kHz) for clarity
+POST = {'tesla': 'equalizer=f=3500:t=q:w=0.8:g=4,volume=4dB,alimiter=limit=0.89'}
 FXEQ = 'equalizer=f=2800:t=q:w=1.2:g=-4'
 # name: (source, gain dB, trim start, length or None, extra pre-filter)
 FX = {
@@ -54,7 +57,7 @@ for w in WORDS + NUMS:
     if w == 'tesla':
         fc = ('[0:a]%s,asplit=3[a][b][c];[a]atrim=0:0.09,asetpts=PTS-STARTPTS,apad=pad_dur=0.04[g];'
               '[b]atrim=0:0.09,asetpts=PTS-STARTPTS,asetrate=44100*0.94,aresample=44100[g2];'
-              '[g][g2][c]concat=n=3:v=0:a=1,%s[o]' % (TRIM, VOICE))
+              '[g][g2][c]concat=n=3:v=0:a=1,%s,%s[o]' % (TRIM, VOICE, POST['tesla']))
         ff(['-i', s, '-filter_complex', fc, '-map', '[o]'] + wav('%s/v_%s.wav' % (out, name)))
     else:
         ff(['-i', s, '-af', '%s,%s' % (TRIM, VOICE)] + wav('%s/v_%s.wav' % (out, name)))

@@ -227,5 +227,46 @@ expect_eq "$(cat "$work/lockchime_request" 2> /dev/null)" "a.wav" "install-now q
 expect_ok "$lockchime" is-current "$lib/b.wav"
 rm -f "$work/lockchime_request"
 
+# battery chime wins over the rotation when CHARGECHIME_AUTO is on
+cp "$lib/a.wav" "$lib/charge_chime.wav"
+expect_eq "$(CHARGECHIME_AUTO=true "$lockchime" pick)" "$lib/charge_chime.wav" "battery chime picked"
+expect_eq "$(CHARGECHIME_AUTO=true "$lockchime" pick b.wav)" "$lib/b.wav" "explicit pick still wins"
+expect_ok bash -c "[ \"\$('$lockchime' pick)\" != '$lib/charge_chime.wav' ]"
+connected=no
+CHARGECHIME_AUTO=true rotate_lock_chime_on boot
+expect_ok "$lockchime" is-current "$lib/charge_chime.wav"
+CHARGECHIME_AUTO=true rotate_lock_chime_on boot
+expect_eq "$(grep -c 'charge_chime.wav is already installed' "$LOG_FILE")" "1" "boot keeps battery chime"
+# BLE manual pick still works
+expect_ok "$lockchime" install-now b.wav
+expect_ok "$lockchime" is-current "$lib/b.wav"
+
+# install-lun: ejects only the chime LUN, swaps, re-inserts
+g="$work/gadget"; mkdir -p "$g/functions/mass_storage.0/lun.0" "$g/functions/mass_storage.0/lun.1"
+echo /backingfiles/cam_disk.bin > "$g/functions/mass_storage.0/lun.0/file"
+echo /backingfiles/music_disk.bin > "$g/functions/mass_storage.0/lun.1/file"
+export LOCKCHIME_GADGET_DIR="$g" LOCKCHIME_IMAGE=/backingfiles/music_disk.bin
+expect_ok "$lockchime" install-lun charge_chime.wav
+expect_ok "$lockchime" is-current "$lib/charge_chime.wav"
+expect_eq "$(cat "$g/functions/mass_storage.0/lun.1/file")" "/backingfiles/music_disk.bin" "LUN re-inserted"
+expect_eq "$(cat "$g/functions/mass_storage.0/lun.0/file")" "/backingfiles/cam_disk.bin" "cam untouched"
+expect_fail env LOCKCHIME_IMAGE=/backingfiles/cam_disk.bin "$lockchime" install-lun a.wav
+# archiveloop uses it when the drives are connected: no idle wait, no disconnect
+connected=yes
+IDLE=no rotate_lock_chime request a.wav
+expect_eq "$(calls)" "" "LUN swap, no full disconnect"
+expect_ok "$lockchime" is-current "$lib/a.wav"
+expect_fail test -e "$work/lockchime_pending"
+# locked medium (eject refused): falls back to idle wait / defer
+chmod 444 "$g/functions/mass_storage.0/lun.1/file"
+if ! { echo x > "$g/functions/mass_storage.0/lun.1/file"; } 2> /dev/null
+then
+  IDLE=no rotate_lock_chime request b.wav
+  expect_eq "$(calls)" "waitforidle " "locked LUN falls back"
+  expect_ok test -e "$work/lockchime_pending"
+fi
+chmod 644 "$g/functions/mass_storage.0/lun.1/file"
+unset LOCKCHIME_GADGET_DIR LOCKCHIME_IMAGE
+
 echo "lockchime tests: $passes passed, $failures failed"
 (( failures == 0 ))

@@ -46,15 +46,17 @@ with tempfile.TemporaryDirectory() as d:
     b = os.path.join(d, 'bin'); lib = os.path.join(d, 'lib'); os.makedirs(b); os.makedirs(lib)
     os.symlink(os.path.join(ROOT, 'run', 'chime_assemble.py'), os.path.join(b, 'chime_assemble.py'))
     with open(os.path.join(b, 'lockchime'), 'w') as f:
-        f.write('#!/bin/bash\necho "$@" >> "%s/requests"\n' % d)
+        f.write('#!/bin/bash\n[ "$1" = is-current ] && exit "${NOTCUR:-0}"\necho "$@" >> "%s/requests"\n' % d)
     os.chmod(os.path.join(b, 'lockchime'), 0o755)
     socf = os.path.join(d, 'soc')
     env = dict(os.environ, CHARGECHIME_BIN=b, LOCKCHIME_DIR=lib, CHARGECHIME_LAST=os.path.join(d, 'last'),
                CHARGECHIME_LOG=os.path.join(d, 'log'), CHARGECHIME_PARTS=PARTS,
-               CHARGECHIME_SOC_CMD='cat ' + socf, PYTHONPATH='')
+               CHARGECHIME_SOC_CMD='cat ' + socf, PYTHONPATH='',
+               CHARGECHIME_WIFI_HOP='false', CHARGECHIME_STATUS=os.path.join(d, 'status'),
+               LOCKCHIME_REQUEST_FILE=os.path.join(d, 'nonexistent_req'))
     def run(soc):
         if soc is None:
-            open(socf, 'w').close(); os.chmod(socf, 0)
+            os.chmod(socf, 0o644) if os.path.exists(socf) else None; open(socf, 'w').close(); os.chmod(socf, 0)
         else:
             os.chmod(socf, 0o644) if os.path.exists(socf) else None
             open(socf, 'w').write('{"soc": %d, "voltage": 355.0}' % soc)
@@ -68,7 +70,13 @@ with tempfile.TemporaryDirectory() as d:
     check('auto unchanged skips', (run(58), len(reqs())), (0, 1))
     check('auto changed', (run(57), len(reqs())), (0, 2))
     if os.geteuid() != 0:
-        check('auto no reading quiet', (run(None), len(reqs())), (0, 2))
+        check('auto no reading', (run(None), len(reqs())), (0, 2))
+        run(None)
+        check('failure logged once', open(os.path.join(d, 'log')).read().count('no battery reading'), 1)
+        check('recovery logged', (run(57), 'reading again (57%)' in open(os.path.join(d, 'log')).read()), (0, True))
+    env['NOTCUR'] = '1'
+    check('unchanged but not installed re-requests', (run(57), len(reqs())), (0, 3))
+    del env['NOTCUR']
     check('auto log', 'battery 57% (was 58)' in open(os.path.join(d, 'log')).read(), True)
     check('no tmp left', sorted(os.listdir(lib)), ['charge_chime.wav'])
 

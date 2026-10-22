@@ -364,6 +364,14 @@ function rotate_lock_chime () {
   local reconnect=false
   if usb_drives_are_connected
   then
+    # preferred: eject only the chime drive's LUN, so the cam drive (which the
+    # car may be writing to, e.g. Sentry Mode) is never disconnected
+    if /root/bin/lockchime install-lun "$clip" >> "$LOG_FILE" 2>&1
+    then
+      log "Lock chime ($reason): installed ${clip##*/} without disconnecting the cam drive"
+      rm -f "$LOCKCHIME_PENDING"
+      return 0
+    fi
     if ! /root/bin/waitforidle
     then
       log "Lock chime ($reason): car is busy writing, will retry later."

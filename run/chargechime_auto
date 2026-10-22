@@ -1,28 +1,136 @@
 #!/bin/bash
 # Run by chargechime.timer: read the battery % from the S3XY Commander and,
-# when the whole-percent value changed, rebuild /mutable/LockChimes/charge_chime.wav
-# and queue it with "lockchime request" (archiveloop swaps it in safely).
-# Skips quietly when there's no reading (not on S3XY_OBD, car asleep).
+# when the whole-percent value changed (or the battery chime isn't the one
+# installed), rebuild /mutable/LockChimes/charge_chime.wav and queue it with
+# "lockchime request" (archiveloop swaps it in safely).
+#
+# The Commander is only reachable on its own Wi-Fi (S3XY_OBD), so unless the
+# Pi is already on it, this hops to S3XY_OBD for the read and then always
+# re-enables every network so wpa_supplicant goes back to the home network
+# (highest priority). Failures are logged, but a repeated failure is logged
+# only once until something changes (no log spam while the car sleeps).
 set -u
 BIN="${CHARGECHIME_BIN:-/root/bin}"
 LIB="${LOCKCHIME_DIR:-/mutable/LockChimes}"
 LAST="${CHARGECHIME_LAST:-/mutable/chargechime.last}"
 LOG="${CHARGECHIME_LOG:-/mutable/archiveloop.log}"
+STATUS="${CHARGECHIME_STATUS:-/tmp/chargechime.status}"
 SOC_CMD="${CHARGECHIME_SOC_CMD:-$BIN/s3xy_soc.py --json --timeout 15}"
+SSID="${CHARGECHIME_SSID:-S3XY_OBD}"
+IFACE="${CHARGECHIME_IFACE:-wlan0}"
+# set to false to never touch Wi-Fi (e.g. for testing, or a second adapter)
+HOP="${CHARGECHIME_WIFI_HOP:-true}"
 OUT="$LIB/charge_chime.wav"
 
 log () { echo "$(date): chargechime: $*" >> "$LOG"; }
 
+# log a failure once; the same failure again is only noted in the journal
+fail () {
+  local msg="$*"
+  if [ "$(cat "$STATUS" 2> /dev/null)" != "$msg" ]
+  then
+    log "$msg"
+    echo "$msg" > "$STATUS"
+  fi
+  echo "chargechime: $msg" >&2
+  exit 0
+}
+
 exec 9> /tmp/chargechime.lock
 flock -n 9 || exit 0
 
-json=$($SOC_CMD 2> /dev/null) || exit 0
-soc=$(printf '%s' "$json" | python3 -c 'import json,sys; print(int(json.load(sys.stdin)["soc"]))' 2> /dev/null) || exit 0
-[[ "$soc" =~ ^[0-9]+$ ]] && (( soc >= 1 && soc <= 100 )) || exit 0
+W="/sbin/wpa_cli -i $IFACE"
+hopped=false
+home_ssid=""
+
+cur_ssid () { $W status 2> /dev/null | sed -n 's/^ssid=//p'; }
+
+go_home () {
+  [ "$hopped" = "true" ] || return 0
+  hopped=false
+  $W enable_network all > /dev/null 2>&1
+  $W reassociate > /dev/null 2>&1
+  [ -n "$home_ssid" ] || return 0
+  local i
+  for i in $(seq 1 45)
+  do
+    sleep 1
+    if [ "$(cur_ssid)" = "$home_ssid" ] && $W status | grep -q '^ip_address='
+    then
+      return 0
+    fi
+  done
+  log "not back on $home_ssid after 45s, reloading the Wi-Fi config"
+  $W reconfigure > /dev/null 2>&1
+  $W enable_network all > /dev/null 2>&1
+  for i in $(seq 1 45)
+  do
+    sleep 1
+    if [ "$(cur_ssid)" = "$home_ssid" ] && $W status | grep -q '^ip_address='
+    then
+      log "back on $home_ssid after reloading the Wi-Fi config"
+      return 0
+    fi
+  done
+  log "still not back on $home_ssid; wpa_supplicant will keep trying (all networks enabled)"
+}
+trap go_home EXIT
+trap 'exit 1' INT TERM HUP
+
+if [ "$HOP" = "true" ] && [ "$(cur_ssid)" != "$SSID" ]
+then
+  netid=$($W list_networks 2> /dev/null | awk -F'\t' -v s="$SSID" '$2 == s {print $1; exit}')
+  [ -n "$netid" ] || fail "no '$SSID' network in wpa_supplicant.conf"
+  if ! $W scan > /dev/null 2>&1 || ! { sleep 4; $W scan_results | awk -F'\t' -v s="$SSID" '$5 == s {f=1} END {exit !f}'; }
+  then
+    fail "$SSID not in range (car asleep or away), skipped"
+  fi
+  home_ssid=$(cur_ssid)
+  hopped=true
+  $W select_network "$netid" > /dev/null 2>&1
+  ok=false
+  for i in $(seq 1 30)
+  do
+    sleep 1
+    if [ "$(cur_ssid)" = "$SSID" ] && ip -4 addr show "$IFACE" | grep -q 'inet 192\.168\.4\.'
+    then
+      ok=true
+      break
+    fi
+  done
+  [ "$ok" = "true" ] || fail "couldn't join $SSID within 30s"
+  sleep 1
+fi
+
+if ! json=$($SOC_CMD 2>&1)
+then
+  fail "no battery reading from the Commander: $(printf '%s' "$json" | tail -1)"
+fi
+go_home
+soc=$(printf '%s' "$json" | python3 -c 'import json,sys; print(int(json.load(sys.stdin)["soc"]))' 2> /dev/null) ||
+  fail "couldn't parse the reading: $json"
+[[ "$soc" =~ ^[0-9]+$ ]] && (( soc >= 1 && soc <= 100 )) || fail "implausible battery reading '$soc'"
+if [ -e "$STATUS" ]
+then
+  log "reading again (${soc}%) after: $(cat "$STATUS")"
+  rm -f "$STATUS"
+fi
 
 last=$(cat "$LAST" 2> /dev/null || true)
 if [ "$soc" = "$last" ] && [ -e "$OUT" ]
 then
+  # unchanged; only re-queue if the battery chime isn't what the car has
+  if "$BIN/lockchime" is-current "$OUT" 2> /dev/null || [ -e "${LOCKCHIME_REQUEST_FILE:-/tmp/lockchime_request}" ] ||
+     [ -e /tmp/lockchime_pending ]
+  then
+    exit 0
+  fi
+  if msg=$("$BIN/lockchime" request charge_chime.wav 2>&1)
+  then
+    log "battery ${soc}% unchanged, but charge_chime.wav isn't installed; requested a swap"
+  else
+    log "battery ${soc}%: lockchime request failed: $msg"
+  fi
   exit 0
 fi
 
